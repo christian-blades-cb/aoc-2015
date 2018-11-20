@@ -1,0 +1,7 @@
+[package]
+name = "day5"
+version = "0.1.0"
+authors = ["Christian Blades <cblades@pindrop.com>"]
+edition = "2018"
+
+[dependencies]
