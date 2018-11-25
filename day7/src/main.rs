@@ -1,4 +1,7 @@
 #[macro_use]
+extern crate log;
+extern crate env_logger;
+#[macro_use]
 extern crate nom;
 
 use nom::types::CompleteStr;
@@ -8,23 +11,23 @@ use std::fs::File;
 use std::io::prelude::*;
 
 fn main() -> Result<(), std::io::Error> {
+    env_logger::init();
+
     let mut file = File::open("input-day7")?;
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
 
     let mut board: WireBoard = HashMap::new();
-    let res_p1 = part1(&buf, &mut board);
+    part1(&buf, &mut board);
+    println!("foo");
 
-    for (n, wire) in board.iter() {
-        println!("[{}] -> {:?} == {:?}", n, wire.0, wire.signal(&board));
-    }
-
+    let res_p1 = get_signal(&board, "a");
     println!("day7.1 {:?}", res_p1);
 
     Ok(())
 }
 
-fn part1(buf: &str, board: &mut WireBoard) -> Option<Signal> {
+fn part1(buf: &str, board: &mut WireBoard) {
     let instructions = buf.lines().filter_map(|ln| {
         let inst = parse_wiring(ln.into());
         if let Ok((_, (name, wiring))) = inst {
@@ -36,7 +39,6 @@ fn part1(buf: &str, board: &mut WireBoard) -> Option<Signal> {
     for (name, wiring) in instructions {
         board.insert(name.as_ref().into(), Wire(wiring));
     }
-    get_signal(&board, "a")
 }
 
 type WireBoard = HashMap<String, Wire>;
@@ -48,36 +50,57 @@ enum SignalRef {
     Signal(Signal),
 }
 
+impl From<&str> for SignalRef {
+    fn from(x: &str) -> SignalRef {
+        SignalRef::Wire(x.into())
+    }
+}
+
+impl From<Signal> for SignalRef {
+    fn from(x: Signal) -> SignalRef {
+        SignalRef::Signal(x)
+    }
+}
+
+impl SignalRef {
+    fn signal(&self, hm: &WireBoard) -> Option<Signal> {
+        debug!("getting signal {:?}", self);
+        match self {
+            SignalRef::Wire(ref other) => get_signal(hm, other),
+            SignalRef::Signal(val) => Some(*val),
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum Wiring {
-    Signal(Signal),
-    Wire(String),
-    Not(String),
-    And(String, String),
-    Or(String, String),
-    Lshift(String, Signal),
-    Rshift(String, Signal),
+    Wire(SignalRef),
+    Not(SignalRef),
+    And(SignalRef, SignalRef),
+    Or(SignalRef, SignalRef),
+    Lshift(SignalRef, Signal),
+    Rshift(SignalRef, Signal),
 }
 
 struct Wire(Wiring);
 
 impl Wire {
     fn signal(&self, hm: &WireBoard) -> Option<Signal> {
+        debug!("wiredef: {:?}", self.0);
         match self.0 {
-            Wiring::Signal(s) => Some(s),
-            Wiring::Wire(ref other) => get_signal(hm, other).map(|val| val),
-            Wiring::Not(ref other) => get_signal(hm, other).map(|val| !val),
-            Wiring::Lshift(ref other, shift_by) => get_signal(hm, other).map(|x| x << shift_by),
-            Wiring::Rshift(ref other, shift_by) => get_signal(hm, other).map(|x| x >> shift_by),
+            Wiring::Wire(ref other) => other.signal(hm),
+            Wiring::Not(ref other) => other.signal(hm).map(|val| !val),
+            Wiring::Lshift(ref other, shift_by) => other.signal(hm).map(|x| x << shift_by),
+            Wiring::Rshift(ref other, shift_by) => other.signal(hm).map(|x| x >> shift_by),
             Wiring::And(ref lhs, ref rhs) => {
-                if let (Some(lval), Some(rval)) = (get_signal(hm, lhs), get_signal(hm, rhs)) {
+                if let (Some(lval), Some(rval)) = (lhs.signal(hm), rhs.signal(hm)) {
                     Some(lval & rval)
                 } else {
                     None
                 }
             }
             Wiring::Or(ref lhs, ref rhs) => {
-                if let (Some(lval), Some(rval)) = (get_signal(hm, lhs), get_signal(hm, rhs)) {
+                if let (Some(lval), Some(rval)) = (lhs.signal(hm), rhs.signal(hm)) {
                     Some(lval | rval)
                 } else {
                     None
@@ -122,43 +145,47 @@ named!(parse_shift<CompleteStr, (CompleteStr, Wiring)>,
                    _ => unreachable!(),
                }))));
 
+named!(parse_signalref_signal<CompleteStr, SignalRef>,
+       do_parse!(
+           signal: digit >>
+               (signal.parse::<Signal>().unwrap().into())));
+
+named!(parse_signalref_wire<CompleteStr, SignalRef>,
+       do_parse!(
+           wire: alpha >>
+               (wire.as_ref().into())));
+
+named!(parse_signalref<CompleteStr, SignalRef>,
+       alt!(parse_signalref_signal|parse_signalref_wire));
+
 named!(parse_bool<CompleteStr, (CompleteStr, Wiring)>,
        do_parse!(
-           lhs: alpha >>
+           lhs: parse_signalref >>
                space >>
                oper: alt!(tag!("AND") | tag!("OR")) >>
                space >>
-               rhs: alpha >>
+               rhs: parse_signalref >>
                space >>
                tag!("->") >>
                space >>
                name: alpha >>
                ((name, match oper.as_ref() {
-                   "AND" => Wiring::And(lhs.as_ref().into(), rhs.as_ref().into()),
-                   "OR" => Wiring::Or(lhs.as_ref().into(), rhs.as_ref().into()),
+                   "AND" => Wiring::And(lhs, rhs),
+                   "OR" => Wiring::Or(lhs, rhs),
                    _ => unreachable!(),
                }))));
 
-named!(parse_signal<CompleteStr, (CompleteStr, Wiring)>,
-       do_parse!(
-           signal: digit >>
-               space >>
-               tag!("->") >>
-               space >>
-               name: alpha >>
-               ((name, Wiring::Signal(signal.parse().unwrap())))));
-
 named!(parse_wire<CompleteStr, (CompleteStr, Wiring)>,
        do_parse!(
-           wire: alpha >>
+           wire: parse_signalref >>
                space >>
                tag!("->") >>
                space >>
                name: alpha >>
-               ((name, Wiring::Wire(wire.as_ref().into())))));
+               ((name, Wiring::Wire(wire)))));
 
 named!(parse_wiring<CompleteStr, (CompleteStr, Wiring)>,
-       alt!(parse_not | parse_shift | parse_bool | parse_signal | parse_wire));
+       alt!(parse_not | parse_shift | parse_bool | parse_wire));
 
 #[cfg(test)]
 mod test {
@@ -175,7 +202,7 @@ y RSHIFT 2 -> g
 NOT x -> h
 NOT y -> i";
         let mut board = HashMap::new();
-        assert_eq!(part1(buf, &mut board), None);
+        part1(buf, &mut board);
         assert_eq!(get_signal(&board, "d"), Some(72));
         assert_eq!(get_signal(&board, "e"), Some(507));
         assert_eq!(get_signal(&board, "f"), Some(492));
@@ -196,13 +223,9 @@ NOT y -> i";
             parse_wiring("ly -> x".into()),
             Ok(("".into(), ("x".into(), Wiring::Wire("ly".into()))))
         );
-    }
-
-    #[test]
-    fn test_parse_signal() {
         assert_eq!(
-            parse_signal("123 -> xy".into()),
-            Ok(("".into(), ("xy".into(), Wiring::Signal(123))))
+            parse_wiring("123 -> xy".into()),
+            Ok(("".into(), ("xy".into(), Wiring::Wire(123.into()))))
         );
     }
 
@@ -221,6 +244,10 @@ NOT y -> i";
                 "".into(),
                 ("fs".into(), Wiring::Or("fq".into(), "fr".into()))
             ))
+        );
+        assert_eq!(
+            parse_bool("1 AND lu -> lv".into()),
+            Ok(("".into(), ("lv".into(), Wiring::And(1.into(), "lu".into()))))
         );
     }
 
@@ -247,7 +274,7 @@ NOT y -> i";
     #[test]
     fn test_signal() {
         let mut hm: HashMap<String, Wire> = HashMap::new();
-        hm.insert("x".into(), Wire(Wiring::Signal(42)));
+        hm.insert("x".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(42));
     }
@@ -256,7 +283,7 @@ NOT y -> i";
     fn test_not() {
         let mut hm: HashMap<String, Wire> = HashMap::new();
         hm.insert("x".into(), Wire(Wiring::Not("y".into())));
-        hm.insert("y".into(), Wire(Wiring::Signal(42)));
+        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(!42u16));
     }
@@ -265,7 +292,7 @@ NOT y -> i";
     fn test_lshift() {
         let mut hm: HashMap<String, Wire> = HashMap::new();
         hm.insert("x".into(), Wire(Wiring::Lshift("y".into(), 8)));
-        hm.insert("y".into(), Wire(Wiring::Signal(42)));
+        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(42u16 << 8));
     }
@@ -274,7 +301,7 @@ NOT y -> i";
     fn test_rshift() {
         let mut hm: HashMap<String, Wire> = HashMap::new();
         hm.insert("x".into(), Wire(Wiring::Rshift("y".into(), 8)));
-        hm.insert("y".into(), Wire(Wiring::Signal(42 << 8)));
+        hm.insert("y".into(), Wire(Wiring::Wire((42 << 8).into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(42u16));
     }
@@ -283,8 +310,8 @@ NOT y -> i";
     fn test_and() {
         let mut hm: HashMap<String, Wire> = HashMap::new();
         hm.insert("x".into(), Wire(Wiring::And("y".into(), "z".into())));
-        hm.insert("y".into(), Wire(Wiring::Signal(42)));
-        hm.insert("z".into(), Wire(Wiring::Signal(45)));
+        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
+        hm.insert("z".into(), Wire(Wiring::Wire(45.into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(42 & 45));
     }
@@ -293,8 +320,8 @@ NOT y -> i";
     fn test_or() {
         let mut hm: HashMap<String, Wire> = HashMap::new();
         hm.insert("x".into(), Wire(Wiring::Or("y".into(), "z".into())));
-        hm.insert("y".into(), Wire(Wiring::Signal(42)));
-        hm.insert("z".into(), Wire(Wiring::Signal(45)));
+        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
+        hm.insert("z".into(), Wire(Wiring::Wire(45.into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(42 | 45));
     }
@@ -303,7 +330,7 @@ NOT y -> i";
     fn test_wire() {
         let mut hm: HashMap<String, Wire> = HashMap::new();
         hm.insert("x".into(), Wire(Wiring::Wire("y".into())));
-        hm.insert("y".into(), Wire(Wiring::Signal(42)));
+        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(42));
     }
