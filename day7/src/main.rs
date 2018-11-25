@@ -3,9 +3,11 @@ extern crate log;
 extern crate env_logger;
 #[macro_use]
 extern crate nom;
+extern crate dot;
 
 use nom::types::CompleteStr;
 use nom::{alpha, digit, space};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
@@ -17,17 +19,23 @@ fn main() -> Result<(), std::io::Error> {
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
 
-    let mut board: WireBoard = HashMap::new();
+    let mut board = Board::new();
     part1(&buf, &mut board);
-    println!("foo");
 
+    {
+        println!("outputting board.dot");
+        let mut outfile = File::create("board.dot")?;
+        board.render_to(&mut outfile);
+    }
+
+    println!("solving");
     let res_p1 = get_signal(&board, "a");
     println!("day7.1 {:?}", res_p1);
 
     Ok(())
 }
 
-fn part1(buf: &str, board: &mut WireBoard) {
+fn part1(buf: &str, board: &mut Board) {
     let instructions = buf.lines().filter_map(|ln| {
         let inst = parse_wiring(ln.into());
         if let Ok((_, (name, wiring))) = inst {
@@ -41,12 +49,138 @@ fn part1(buf: &str, board: &mut WireBoard) {
     }
 }
 
-type WireBoard = HashMap<String, Wire>;
+struct Board(WireBoard);
+type WireBoard = HashMap<Terminal, Wire>;
 type Signal = u16;
+type Terminal = String;
 
-#[derive(Debug, Eq, PartialEq)]
+impl Board {
+    fn new() -> Self {
+        Board(HashMap::new())
+    }
+
+    fn get(&self, key: &str) -> Option<&Wire> {
+        self.0.get(key)
+    }
+
+    // fn get(&self, key: &Terminal) -> Option<&Wire> {
+    //     self.0.get(key)
+    // }
+
+    fn insert(&mut self, k: Terminal, v: Wire) -> Option<Wire> {
+        self.0.insert(k, v)
+    }
+
+    fn iter(&self) -> std::collections::hash_map::Iter<Terminal, Wire> {
+        self.0.iter()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn render_to<W: Write>(&self, output: &mut W) {
+        dot::render(self, output).unwrap()
+    }
+}
+
+type Nd = (Terminal, Wire);
+type Ed = (Terminal, Terminal);
+
+impl<'a> dot::Labeller<'a, Nd, Ed> for Board {
+    fn graph_id(&'a self) -> dot::Id<'a> {
+        dot::Id::new("Board").unwrap()
+    }
+
+    fn node_id(&'a self, n: &Nd) -> dot::Id<'a> {
+        dot::Id::new(format!("N{}", n.0)).unwrap()
+    }
+
+    fn node_label<'b>(&'b self, n: &Nd) -> dot::LabelText<'b> {
+        let (name, Wire(val)) = n;
+        dot::LabelText::LabelStr(
+            match val {
+                Wiring::Wire(ref other) => format!("{:?} -> {}", other, name),
+                Wiring::Not(ref other) => format!("{:?} -> {}", other, name),
+                Wiring::And(ref lhs, ref rhs) => format!("{:?} AND {:?} -> {}", lhs, rhs, name),
+                Wiring::Or(ref lhs, ref rhs) => format!("{:?} OR {:?} -> {}", lhs, rhs, name),
+                Wiring::Lshift(ref other, shift_by) => {
+                    format!("{:?} LSHIFT {} -> {}", other, shift_by, name)
+                }
+                Wiring::Rshift(ref other, shift_by) => {
+                    format!("{:?} RSHIFT {} -> {}", other, shift_by, name)
+                }
+            }
+            .into(),
+        )
+    }
+}
+
+impl<'a> dot::GraphWalk<'a, Nd, Ed> for Board {
+    fn nodes(&self) -> dot::Nodes<'a, Nd> {
+        let nodes: Vec<Nd> = self
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        Cow::Owned(nodes)
+    }
+
+    fn edges(&'a self) -> dot::Edges<'a, Ed> {
+        let edges: Vec<Ed> = self
+            .iter()
+            .filter_map(|(k, Wire(v))| match v {
+                Wiring::Wire(SignalRef::Wire(ref w)) => Some(vec![(k.to_string(), w.to_string())]),
+                Wiring::Wire(SignalRef::Signal(_)) => None,
+                Wiring::Not(SignalRef::Wire(ref w)) => Some(vec![(k.to_string(), w.to_string())]),
+                Wiring::Not(SignalRef::Signal(_)) => None,
+                Wiring::And(SignalRef::Signal(_), SignalRef::Signal(_)) => None,
+                Wiring::And(SignalRef::Signal(_), SignalRef::Wire(ref w)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::And(SignalRef::Wire(ref w), SignalRef::Signal(_)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::And(SignalRef::Wire(ref lhs), SignalRef::Wire(ref rhs)) => Some(vec![
+                    (k.to_string(), lhs.to_string()),
+                    (k.to_string(), rhs.to_string()),
+                ]),
+                Wiring::Or(SignalRef::Signal(_), SignalRef::Signal(_)) => None,
+                Wiring::Or(SignalRef::Signal(_), SignalRef::Wire(ref w)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::Or(SignalRef::Wire(ref w), SignalRef::Signal(_)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::Or(SignalRef::Wire(ref lhs), SignalRef::Wire(ref rhs)) => Some(vec![
+                    (k.to_string(), lhs.to_string()),
+                    (k.to_string(), rhs.to_string()),
+                ]),
+                Wiring::Lshift(SignalRef::Signal(_), _) => None,
+                Wiring::Lshift(SignalRef::Wire(ref w), _) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::Rshift(SignalRef::Signal(_), _) => None,
+                Wiring::Rshift(SignalRef::Wire(ref w), _) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+            })
+            .flatten()
+            .collect();
+        Cow::Owned(edges)
+    }
+
+    fn source(&self, e: &Ed) -> Nd {
+        (e.0.to_string(), self.get(&e.0).unwrap().clone())
+    }
+
+    fn target(&self, e: &Ed) -> Nd {
+        (e.1.to_string(), self.get(&e.1).unwrap().clone())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
 enum SignalRef {
-    Wire(String),
+    Wire(Terminal),
     Signal(Signal),
 }
 
@@ -63,7 +197,7 @@ impl From<Signal> for SignalRef {
 }
 
 impl SignalRef {
-    fn signal(&self, hm: &WireBoard) -> Option<Signal> {
+    fn signal(&self, hm: &Board) -> Option<Signal> {
         debug!("getting signal {:?}", self);
         match self {
             SignalRef::Wire(ref other) => get_signal(hm, other),
@@ -72,7 +206,7 @@ impl SignalRef {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 enum Wiring {
     Wire(SignalRef),
     Not(SignalRef),
@@ -82,10 +216,11 @@ enum Wiring {
     Rshift(SignalRef, Signal),
 }
 
+#[derive(Clone)]
 struct Wire(Wiring);
 
 impl Wire {
-    fn signal(&self, hm: &WireBoard) -> Option<Signal> {
+    fn signal(&self, hm: &Board) -> Option<Signal> {
         debug!("wiredef: {:?}", self.0);
         match self.0 {
             Wiring::Wire(ref other) => other.signal(hm),
@@ -110,7 +245,7 @@ impl Wire {
     }
 }
 
-fn get_signal(hm: &WireBoard, key: &str) -> Option<Signal> {
+fn get_signal(hm: &Board, key: &str) -> Option<Signal> {
     match hm.get(key).map(|sw| sw.signal(hm)) {
         Some(Some(x)) => Some(x),
         _ => None,
@@ -201,7 +336,7 @@ x LSHIFT 2 -> f
 y RSHIFT 2 -> g
 NOT x -> h
 NOT y -> i";
-        let mut board = HashMap::new();
+        let mut board = Board::new();
         part1(buf, &mut board);
         assert_eq!(get_signal(&board, "d"), Some(72));
         assert_eq!(get_signal(&board, "e"), Some(507));
@@ -273,7 +408,7 @@ NOT y -> i";
 
     #[test]
     fn test_signal() {
-        let mut hm: HashMap<String, Wire> = HashMap::new();
+        let mut hm = Board::new();
         hm.insert("x".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
         assert_eq!(wire.signal(&hm), Some(42));
@@ -281,7 +416,7 @@ NOT y -> i";
 
     #[test]
     fn test_not() {
-        let mut hm: HashMap<String, Wire> = HashMap::new();
+        let mut hm = Board::new();
         hm.insert("x".into(), Wire(Wiring::Not("y".into())));
         hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
@@ -290,7 +425,7 @@ NOT y -> i";
 
     #[test]
     fn test_lshift() {
-        let mut hm: HashMap<String, Wire> = HashMap::new();
+        let mut hm = Board::new();
         hm.insert("x".into(), Wire(Wiring::Lshift("y".into(), 8)));
         hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
@@ -299,7 +434,7 @@ NOT y -> i";
 
     #[test]
     fn test_rshift() {
-        let mut hm: HashMap<String, Wire> = HashMap::new();
+        let mut hm = Board::new();
         hm.insert("x".into(), Wire(Wiring::Rshift("y".into(), 8)));
         hm.insert("y".into(), Wire(Wiring::Wire((42 << 8).into())));
         let wire = hm.get("x").unwrap();
@@ -308,7 +443,7 @@ NOT y -> i";
 
     #[test]
     fn test_and() {
-        let mut hm: HashMap<String, Wire> = HashMap::new();
+        let mut hm = Board::new();
         hm.insert("x".into(), Wire(Wiring::And("y".into(), "z".into())));
         hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         hm.insert("z".into(), Wire(Wiring::Wire(45.into())));
@@ -318,7 +453,7 @@ NOT y -> i";
 
     #[test]
     fn test_or() {
-        let mut hm: HashMap<String, Wire> = HashMap::new();
+        let mut hm = Board::new();
         hm.insert("x".into(), Wire(Wiring::Or("y".into(), "z".into())));
         hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         hm.insert("z".into(), Wire(Wiring::Wire(45.into())));
@@ -328,7 +463,7 @@ NOT y -> i";
 
     #[test]
     fn test_wire() {
-        let mut hm: HashMap<String, Wire> = HashMap::new();
+        let mut hm = Board::new();
         hm.insert("x".into(), Wire(Wiring::Wire("y".into())));
         hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
         let wire = hm.get("x").unwrap();
