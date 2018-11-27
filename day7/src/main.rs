@@ -24,8 +24,9 @@ fn main() -> Result<(), std::io::Error> {
     file.read_to_string(&mut buf)?;
 
     let mut board = Board::new();
-    part1(&buf, &mut board);
+    board.populate(&buf);
 
+    // change to true to generate a dot file for graphviz
     if false {
         println!("outputting board.dot");
         let mut outfile = File::create("board.dot")?;
@@ -61,6 +62,12 @@ impl<'a> Cache<'a> {
     }
 
     fn solve(&mut self, key: &str) -> Option<Signal> {
+        let res = self.cache.get(key).map(|&v| v);
+        if let Some(s) = res {
+            return Some(s);
+        }
+
+        // build topology
         let mut topology: TopologicalSort<&str> =
             self.inner
                 .iter()
@@ -104,6 +111,10 @@ impl<'a> Cache<'a> {
                     },
                 );
 
+        // * pop each set of nodes with no dependencies
+        // * solve nodes out of cache
+        // * cache node
+        // * repeat until we've exhausted all of the nodes
         loop {
             let to_solve = topology.pop_all();
             if to_solve.len() == 0 {
@@ -171,20 +182,6 @@ impl<'a> Cache<'a> {
     }
 }
 
-fn part1(buf: &str, board: &mut Board) {
-    let instructions = buf.lines().filter_map(|ln| {
-        let inst = parse_wiring(ln.into());
-        if let Ok((_, (name, wiring))) = inst {
-            Some((name, wiring))
-        } else {
-            None
-        }
-    });
-    for (name, wiring) in instructions {
-        board.insert(name.as_ref().into(), Wire(wiring));
-    }
-}
-
 struct Board(WireBoard);
 type WireBoard = HashMap<Terminal, Wire>;
 type Signal = u16;
@@ -195,125 +192,31 @@ impl Board {
         Board(HashMap::new())
     }
 
-    fn get(&self, key: &str) -> Option<&Wire> {
-        self.0.get(key)
+    fn populate(&mut self, buf: &str) {
+        let instructions = buf.lines().filter_map(|ln| {
+            let inst = parse_wiring(ln.into());
+            if let Ok((_, (name, wiring))) = inst {
+                Some((name, wiring))
+            } else {
+                None
+            }
+        });
+        for (name, wiring) in instructions {
+            self.0.insert(name.as_ref().into(), Wire(wiring));
+        }
     }
 
-    fn insert(&mut self, k: Terminal, v: Wire) -> Option<Wire> {
-        self.0.insert(k, v)
+    fn get(&self, key: &str) -> Option<&Wire> {
+        self.0.get(key)
     }
 
     fn iter(&self) -> std::collections::hash_map::Iter<Terminal, Wire> {
         self.0.iter()
     }
 
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
+    // writes a graphviz dot file of the wiring-board
     fn render_to<W: Write>(&self, output: &mut W) {
         dot::render(self, output).unwrap()
-    }
-
-    fn get_signal(&self, key: &str) -> Option<Signal> {
-        match self.get(key).map(|sw| sw.signal(self)) {
-            Some(Some(x)) => Some(x),
-            _ => None,
-        }
-    }
-}
-
-type Nd = (Terminal, Wire);
-type Ed = (Terminal, Terminal);
-
-impl<'a> dot::Labeller<'a, Nd, Ed> for Board {
-    fn graph_id(&'a self) -> dot::Id<'a> {
-        dot::Id::new("Board").unwrap()
-    }
-
-    fn node_id(&'a self, n: &Nd) -> dot::Id<'a> {
-        dot::Id::new(format!("N{}", n.0)).unwrap()
-    }
-
-    fn node_label<'b>(&'b self, n: &Nd) -> dot::LabelText<'b> {
-        let (name, Wire(val)) = n;
-        dot::LabelText::LabelStr(
-            match val {
-                Wiring::Wire(ref other) => format!("{:?} -> {}", other, name),
-                Wiring::Not(ref other) => format!("{:?} -> {}", other, name),
-                Wiring::And(ref lhs, ref rhs) => format!("{:?} AND {:?} -> {}", lhs, rhs, name),
-                Wiring::Or(ref lhs, ref rhs) => format!("{:?} OR {:?} -> {}", lhs, rhs, name),
-                Wiring::Lshift(ref other, shift_by) => {
-                    format!("{:?} LSHIFT {} -> {}", other, shift_by, name)
-                }
-                Wiring::Rshift(ref other, shift_by) => {
-                    format!("{:?} RSHIFT {} -> {}", other, shift_by, name)
-                }
-            }
-            .into(),
-        )
-    }
-}
-
-impl<'a> dot::GraphWalk<'a, Nd, Ed> for Board {
-    fn nodes(&self) -> dot::Nodes<'a, Nd> {
-        let nodes: Vec<Nd> = self
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-        Cow::Owned(nodes)
-    }
-
-    fn edges(&'a self) -> dot::Edges<'a, Ed> {
-        let edges: Vec<Ed> = self
-            .iter()
-            .filter_map(|(k, Wire(v))| match v {
-                Wiring::Wire(SignalRef::Wire(ref w)) => Some(vec![(k.to_string(), w.to_string())]),
-                Wiring::Wire(SignalRef::Signal(_)) => None,
-                Wiring::Not(SignalRef::Wire(ref w)) => Some(vec![(k.to_string(), w.to_string())]),
-                Wiring::Not(SignalRef::Signal(_)) => None,
-                Wiring::And(SignalRef::Signal(_), SignalRef::Signal(_)) => None,
-                Wiring::And(SignalRef::Signal(_), SignalRef::Wire(ref w)) => {
-                    Some(vec![(k.to_string(), w.to_string())])
-                }
-                Wiring::And(SignalRef::Wire(ref w), SignalRef::Signal(_)) => {
-                    Some(vec![(k.to_string(), w.to_string())])
-                }
-                Wiring::And(SignalRef::Wire(ref lhs), SignalRef::Wire(ref rhs)) => Some(vec![
-                    (k.to_string(), lhs.to_string()),
-                    (k.to_string(), rhs.to_string()),
-                ]),
-                Wiring::Or(SignalRef::Signal(_), SignalRef::Signal(_)) => None,
-                Wiring::Or(SignalRef::Signal(_), SignalRef::Wire(ref w)) => {
-                    Some(vec![(k.to_string(), w.to_string())])
-                }
-                Wiring::Or(SignalRef::Wire(ref w), SignalRef::Signal(_)) => {
-                    Some(vec![(k.to_string(), w.to_string())])
-                }
-                Wiring::Or(SignalRef::Wire(ref lhs), SignalRef::Wire(ref rhs)) => Some(vec![
-                    (k.to_string(), lhs.to_string()),
-                    (k.to_string(), rhs.to_string()),
-                ]),
-                Wiring::Lshift(SignalRef::Signal(_), _) => None,
-                Wiring::Lshift(SignalRef::Wire(ref w), _) => {
-                    Some(vec![(k.to_string(), w.to_string())])
-                }
-                Wiring::Rshift(SignalRef::Signal(_), _) => None,
-                Wiring::Rshift(SignalRef::Wire(ref w), _) => {
-                    Some(vec![(k.to_string(), w.to_string())])
-                }
-            })
-            .flatten()
-            .collect();
-        Cow::Owned(edges)
-    }
-
-    fn source(&self, e: &Ed) -> Nd {
-        (e.0.to_string(), self.get(&e.0).unwrap().clone())
-    }
-
-    fn target(&self, e: &Ed) -> Nd {
-        (e.1.to_string(), self.get(&e.1).unwrap().clone())
     }
 }
 
@@ -335,16 +238,6 @@ impl From<Signal> for SignalRef {
     }
 }
 
-impl SignalRef {
-    fn signal(&self, hm: &Board) -> Option<Signal> {
-        debug!("getting signal {:?}", self);
-        match self {
-            SignalRef::Wire(ref other) => hm.get_signal(other),
-            SignalRef::Signal(val) => Some(*val),
-        }
-    }
-}
-
 #[derive(Debug, Eq, PartialEq, Clone)]
 enum Wiring {
     Wire(SignalRef),
@@ -358,31 +251,9 @@ enum Wiring {
 #[derive(Clone)]
 struct Wire(Wiring);
 
-impl Wire {
-    fn signal(&self, hm: &Board) -> Option<Signal> {
-        debug!("wiredef: {:?}", self.0);
-        match self.0 {
-            Wiring::Wire(ref other) => other.signal(hm),
-            Wiring::Not(ref other) => other.signal(hm).map(|val| !val),
-            Wiring::Lshift(ref other, shift_by) => other.signal(hm).map(|x| x << shift_by),
-            Wiring::Rshift(ref other, shift_by) => other.signal(hm).map(|x| x >> shift_by),
-            Wiring::And(ref lhs, ref rhs) => {
-                if let (Some(lval), Some(rval)) = (lhs.signal(hm), rhs.signal(hm)) {
-                    Some(lval & rval)
-                } else {
-                    None
-                }
-            }
-            Wiring::Or(ref lhs, ref rhs) => {
-                if let (Some(lval), Some(rval)) = (lhs.signal(hm), rhs.signal(hm)) {
-                    Some(lval | rval)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
+////////////////////////
+// parser-combinators //
+////////////////////////
 
 named!(parse_not<CompleteStr, (CompleteStr, Wiring)>,
        do_parse!(
@@ -478,37 +349,38 @@ b RSHIFT 5 -> f
 19138 -> b
 ";
         let mut board = Board::new();
-        part1(buf, &mut board);
+        board.populate(buf);
+        let mut cached = Cache::new(&board);
         let b = 19138;
-        assert_eq!(board.get_signal("b"), Some(b));
+        assert_eq!(cached.solve("b"), Some(b));
         let f = b >> 5;
-        assert_eq!(board.get_signal("f"), Some(f));
+        assert_eq!(cached.solve("f"), Some(f));
         let e = b >> 3;
-        assert_eq!(board.get_signal("e"), Some(e));
+        assert_eq!(cached.solve("e"), Some(e));
         let g = e | f;
-        assert_eq!(board.get_signal("g"), Some(g));
+        assert_eq!(cached.solve("g"), Some(g));
         let h = e & f;
-        assert_eq!(board.get_signal("h"), Some(h));
+        assert_eq!(cached.solve("h"), Some(h));
         let i = h;
-        assert_eq!(board.get_signal("i"), Some(i));
+        assert_eq!(cached.solve("i"), Some(i));
         let j = g & i;
-        assert_eq!(board.get_signal("j"), Some(j));
+        assert_eq!(cached.solve("j"), Some(j));
         let d = b >> 2;
-        assert_eq!(board.get_signal("d"), Some(d));
+        assert_eq!(cached.solve("d"), Some(d));
         let l = d & j;
-        assert_eq!(board.get_signal("l"), Some(l));
+        assert_eq!(cached.solve("l"), Some(l));
         let k = d | j;
-        assert_eq!(board.get_signal("k"), Some(k));
+        assert_eq!(cached.solve("k"), Some(k));
         let m = l;
-        assert_eq!(board.get_signal("m"), Some(m));
+        assert_eq!(cached.solve("m"), Some(m));
         let n = k & m;
-        assert_eq!(board.get_signal("n"), Some(n));
+        assert_eq!(cached.solve("n"), Some(n));
         let p = b & n;
-        assert_eq!(board.get_signal("p"), Some(p));
+        assert_eq!(cached.solve("p"), Some(p));
         let o = b | n;
-        assert_eq!(board.get_signal("o"), Some(o));
+        assert_eq!(cached.solve("o"), Some(o));
         let q = p;
-        assert_eq!(board.get_signal("q"), Some(q));
+        assert_eq!(cached.solve("q"), Some(q));
     }
 
     #[test]
@@ -522,15 +394,16 @@ y RSHIFT 2 -> g
 NOT x -> h
 NOT y -> i";
         let mut board = Board::new();
-        part1(buf, &mut board);
-        assert_eq!(board.get_signal("d"), Some(72));
-        assert_eq!(board.get_signal("e"), Some(507));
-        assert_eq!(board.get_signal("f"), Some(492));
-        assert_eq!(board.get_signal("g"), Some(114));
-        assert_eq!(board.get_signal("h"), Some(65412));
-        assert_eq!(board.get_signal("i"), Some(65079));
-        assert_eq!(board.get_signal("x"), Some(123));
-        assert_eq!(board.get_signal("y"), Some(456));
+        board.populate(buf);
+        let mut cached = Cache::new(&board);
+        assert_eq!(cached.solve("d"), Some(72));
+        assert_eq!(cached.solve("e"), Some(507));
+        assert_eq!(cached.solve("f"), Some(492));
+        assert_eq!(cached.solve("g"), Some(114));
+        assert_eq!(cached.solve("h"), Some(65412));
+        assert_eq!(cached.solve("i"), Some(65079));
+        assert_eq!(cached.solve("x"), Some(123));
+        assert_eq!(cached.solve("y"), Some(456));
     }
 
     #[test]
@@ -590,68 +463,103 @@ NOT y -> i";
             Ok(("".into(), ("m".into(), Wiring::Not("l".into())))),
         );
     }
+}
 
-    #[test]
-    fn test_signal() {
-        let mut hm = Board::new();
-        hm.insert("x".into(), Wire(Wiring::Wire(42.into())));
-        let wire = hm.get("x").unwrap();
-        assert_eq!(wire.signal(&hm), Some(42));
+/////////////////////////////////////////////////////////////////////////
+// All this nonsense is for generating a graphviz .dot file for visual //
+// debugging                                                           //
+/////////////////////////////////////////////////////////////////////////
+
+type Nd = (Terminal, Wire);
+type Ed = (Terminal, Terminal);
+
+impl<'a> dot::Labeller<'a, Nd, Ed> for Board {
+    fn graph_id(&'a self) -> dot::Id<'a> {
+        dot::Id::new("Board").unwrap()
     }
 
-    #[test]
-    fn test_not() {
-        let mut hm = Board::new();
-        hm.insert("x".into(), Wire(Wiring::Not("y".into())));
-        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
-        let wire = hm.get("x").unwrap();
-        assert_eq!(wire.signal(&hm), Some(!42u16));
+    fn node_id(&'a self, n: &Nd) -> dot::Id<'a> {
+        dot::Id::new(format!("N{}", n.0)).unwrap()
     }
 
-    #[test]
-    fn test_lshift() {
-        let mut hm = Board::new();
-        hm.insert("x".into(), Wire(Wiring::Lshift("y".into(), 8)));
-        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
-        let wire = hm.get("x").unwrap();
-        assert_eq!(wire.signal(&hm), Some(42u16 << 8));
+    fn node_label<'b>(&'b self, n: &Nd) -> dot::LabelText<'b> {
+        let (name, Wire(val)) = n;
+        dot::LabelText::LabelStr(
+            match val {
+                Wiring::Wire(ref other) => format!("{:?} -> {}", other, name),
+                Wiring::Not(ref other) => format!("{:?} -> {}", other, name),
+                Wiring::And(ref lhs, ref rhs) => format!("{:?} AND {:?} -> {}", lhs, rhs, name),
+                Wiring::Or(ref lhs, ref rhs) => format!("{:?} OR {:?} -> {}", lhs, rhs, name),
+                Wiring::Lshift(ref other, shift_by) => {
+                    format!("{:?} LSHIFT {} -> {}", other, shift_by, name)
+                }
+                Wiring::Rshift(ref other, shift_by) => {
+                    format!("{:?} RSHIFT {} -> {}", other, shift_by, name)
+                }
+            }
+            .into(),
+        )
+    }
+}
+
+impl<'a> dot::GraphWalk<'a, Nd, Ed> for Board {
+    fn nodes(&self) -> dot::Nodes<'a, Nd> {
+        let nodes: Vec<Nd> = self
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        Cow::Owned(nodes)
     }
 
-    #[test]
-    fn test_rshift() {
-        let mut hm = Board::new();
-        hm.insert("x".into(), Wire(Wiring::Rshift("y".into(), 8)));
-        hm.insert("y".into(), Wire(Wiring::Wire((42 << 8).into())));
-        let wire = hm.get("x").unwrap();
-        assert_eq!(wire.signal(&hm), Some(42u16));
+    fn edges(&'a self) -> dot::Edges<'a, Ed> {
+        let edges: Vec<Ed> = self
+            .iter()
+            .filter_map(|(k, Wire(v))| match v {
+                Wiring::Wire(SignalRef::Wire(ref w)) => Some(vec![(k.to_string(), w.to_string())]),
+                Wiring::Wire(SignalRef::Signal(_)) => None,
+                Wiring::Not(SignalRef::Wire(ref w)) => Some(vec![(k.to_string(), w.to_string())]),
+                Wiring::Not(SignalRef::Signal(_)) => None,
+                Wiring::And(SignalRef::Signal(_), SignalRef::Signal(_)) => None,
+                Wiring::And(SignalRef::Signal(_), SignalRef::Wire(ref w)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::And(SignalRef::Wire(ref w), SignalRef::Signal(_)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::And(SignalRef::Wire(ref lhs), SignalRef::Wire(ref rhs)) => Some(vec![
+                    (k.to_string(), lhs.to_string()),
+                    (k.to_string(), rhs.to_string()),
+                ]),
+                Wiring::Or(SignalRef::Signal(_), SignalRef::Signal(_)) => None,
+                Wiring::Or(SignalRef::Signal(_), SignalRef::Wire(ref w)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::Or(SignalRef::Wire(ref w), SignalRef::Signal(_)) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::Or(SignalRef::Wire(ref lhs), SignalRef::Wire(ref rhs)) => Some(vec![
+                    (k.to_string(), lhs.to_string()),
+                    (k.to_string(), rhs.to_string()),
+                ]),
+                Wiring::Lshift(SignalRef::Signal(_), _) => None,
+                Wiring::Lshift(SignalRef::Wire(ref w), _) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+                Wiring::Rshift(SignalRef::Signal(_), _) => None,
+                Wiring::Rshift(SignalRef::Wire(ref w), _) => {
+                    Some(vec![(k.to_string(), w.to_string())])
+                }
+            })
+            .flatten()
+            .collect();
+        Cow::Owned(edges)
     }
 
-    #[test]
-    fn test_and() {
-        let mut hm = Board::new();
-        hm.insert("x".into(), Wire(Wiring::And("y".into(), "z".into())));
-        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
-        hm.insert("z".into(), Wire(Wiring::Wire(45.into())));
-        let wire = hm.get("x").unwrap();
-        assert_eq!(wire.signal(&hm), Some(42 & 45));
+    fn source(&self, e: &Ed) -> Nd {
+        (e.0.to_string(), self.get(&e.0).unwrap().clone())
     }
 
-    #[test]
-    fn test_or() {
-        let mut hm = Board::new();
-        hm.insert("x".into(), Wire(Wiring::Or("y".into(), "z".into())));
-        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
-        hm.insert("z".into(), Wire(Wiring::Wire(45.into())));
-        let wire = hm.get("x").unwrap();
-        assert_eq!(wire.signal(&hm), Some(42 | 45));
-    }
-
-    #[test]
-    fn test_wire() {
-        let mut hm = Board::new();
-        hm.insert("x".into(), Wire(Wiring::Wire("y".into())));
-        hm.insert("y".into(), Wire(Wiring::Wire(42.into())));
-        let wire = hm.get("x").unwrap();
-        assert_eq!(wire.signal(&hm), Some(42));
+    fn target(&self, e: &Ed) -> Nd {
+        (e.1.to_string(), self.get(&e.1).unwrap().clone())
     }
 }
