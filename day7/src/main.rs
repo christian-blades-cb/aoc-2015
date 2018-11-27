@@ -1,9 +1,11 @@
+extern crate tap;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
 #[macro_use]
 extern crate nom;
 extern crate dot;
+extern crate topological_sort;
 
 use nom::types::CompleteStr;
 use nom::{alpha, digit, space};
@@ -11,6 +13,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
+use tap::TapOps;
+use topological_sort::TopologicalSort;
 
 fn main() -> Result<(), std::io::Error> {
     env_logger::init();
@@ -22,17 +26,141 @@ fn main() -> Result<(), std::io::Error> {
     let mut board = Board::new();
     part1(&buf, &mut board);
 
-    {
+    if false {
         println!("outputting board.dot");
         let mut outfile = File::create("board.dot")?;
         board.render_to(&mut outfile);
     }
 
-    println!("solving");
-    let res_p1 = get_signal(&board, "a");
+    let mut cached = Cache::new(&board);
+    let res_p1 = cached.solve("a");
     println!("day7.1 {:?}", res_p1);
 
     Ok(())
+}
+
+struct Cache<'a> {
+    inner: &'a Board,
+    cache: HashMap<Terminal, Signal>,
+}
+
+impl<'a> Cache<'a> {
+    fn new(board: &'a Board) -> Cache<'a> {
+        Cache {
+            inner: board,
+            cache: HashMap::new(),
+        }
+    }
+
+    fn solve(&mut self, key: &str) -> Option<Signal> {
+        let mut topology: TopologicalSort<&str> =
+            self.inner
+                .iter()
+                .fold(
+                    TopologicalSort::new(),
+                    |mut acc, (this, Wire(wiring))| match wiring {
+                        Wiring::Wire(SignalRef::Signal(_)) => acc,
+                        Wiring::Wire(SignalRef::Wire(w)) => {
+                            acc.tap(|a| a.add_dependency(w.as_ref(), this.as_ref()))
+                        }
+                        Wiring::Not(SignalRef::Signal(_)) => acc,
+                        Wiring::Not(SignalRef::Wire(w)) => {
+                            acc.tap(|a| a.add_dependency(w.as_ref(), this.as_ref()))
+                        }
+                        Wiring::Lshift(SignalRef::Wire(w), _) => {
+                            acc.tap(|a| a.add_dependency(w.as_ref(), this.as_ref()))
+                        }
+                        Wiring::Lshift(SignalRef::Signal(_), _) => acc,
+                        Wiring::Rshift(SignalRef::Wire(w), _) => {
+                            acc.tap(|a| a.add_dependency(w.as_ref(), this.as_ref()))
+                        }
+                        Wiring::Rshift(SignalRef::Signal(_), _) => acc,
+                        Wiring::And(lhs, rhs) => {
+                            if let SignalRef::Wire(w) = lhs {
+                                acc.add_dependency(w.as_ref(), this.as_ref());
+                            }
+                            if let SignalRef::Wire(w) = rhs {
+                                acc.add_dependency(w.as_ref(), this.as_ref());
+                            }
+                            acc
+                        }
+                        Wiring::Or(lhs, rhs) => {
+                            if let SignalRef::Wire(w) = lhs {
+                                acc.add_dependency(w.as_ref(), this.as_ref());
+                            }
+                            if let SignalRef::Wire(w) = rhs {
+                                acc.add_dependency(w.as_ref(), this.as_ref());
+                            }
+                            acc
+                        }
+                    },
+                );
+
+        loop {
+            let to_solve = topology.pop_all();
+            if to_solve.len() == 0 {
+                break;
+            }
+            for wire in to_solve {
+                info!("solving for {}", wire);
+                let Wire(wiring) = self.inner.get(wire).unwrap();
+                match wiring {
+                    Wiring::Wire(SignalRef::Signal(v)) => {
+                        self.cache.insert(wire.into(), *v);
+                    }
+                    Wiring::Wire(SignalRef::Wire(w)) => {
+                        let v = self.cache.get(w).unwrap();
+                        self.cache.insert(wire.into(), *v);
+                    }
+                    Wiring::Not(SignalRef::Signal(v)) => {
+                        self.cache.insert(wire.into(), !v);
+                    }
+                    Wiring::Not(SignalRef::Wire(w)) => {
+                        let v = self.cache.get(w).unwrap();
+                        self.cache.insert(wire.into(), !v);
+                    }
+                    Wiring::Lshift(SignalRef::Signal(v), shift_by) => {
+                        self.cache.insert(wire.into(), v << shift_by);
+                    }
+                    Wiring::Lshift(SignalRef::Wire(w), shift_by) => {
+                        let v = self.cache.get(w).unwrap();
+                        self.cache.insert(wire.into(), v << shift_by);
+                    }
+                    Wiring::Rshift(SignalRef::Signal(v), shift_by) => {
+                        self.cache.insert(wire.into(), v >> shift_by);
+                    }
+                    Wiring::Rshift(SignalRef::Wire(w), shift_by) => {
+                        let v = self.cache.get(w).unwrap();
+                        self.cache.insert(wire.into(), v >> shift_by);
+                    }
+                    Wiring::And(lhs, rhs) => {
+                        let l_v = match lhs {
+                            SignalRef::Wire(w) => self.cache.get(w).unwrap(),
+                            SignalRef::Signal(v) => v,
+                        };
+                        let r_v = match rhs {
+                            SignalRef::Wire(w) => self.cache.get(w).unwrap(),
+                            SignalRef::Signal(v) => v,
+                        };
+                        self.cache.insert(wire.into(), l_v & r_v);
+                    }
+                    Wiring::Or(lhs, rhs) => {
+                        let l_v = match lhs {
+                            SignalRef::Wire(w) => self.cache.get(w).unwrap(),
+                            SignalRef::Signal(v) => v,
+                        };
+                        let r_v = match rhs {
+                            SignalRef::Wire(w) => self.cache.get(w).unwrap(),
+                            SignalRef::Signal(v) => v,
+                        };
+                        self.cache.insert(wire.into(), l_v | r_v);
+                    }
+                }
+            }
+        }
+
+        self.cache.get(key).map(|&k| k)
+    }
 }
 
 fn part1(buf: &str, board: &mut Board) {
@@ -63,10 +191,6 @@ impl Board {
         self.0.get(key)
     }
 
-    // fn get(&self, key: &Terminal) -> Option<&Wire> {
-    //     self.0.get(key)
-    // }
-
     fn insert(&mut self, k: Terminal, v: Wire) -> Option<Wire> {
         self.0.insert(k, v)
     }
@@ -81,6 +205,13 @@ impl Board {
 
     fn render_to<W: Write>(&self, output: &mut W) {
         dot::render(self, output).unwrap()
+    }
+
+    fn get_signal(&self, key: &str) -> Option<Signal> {
+        match self.get(key).map(|sw| sw.signal(self)) {
+            Some(Some(x)) => Some(x),
+            _ => None,
+        }
     }
 }
 
@@ -200,7 +331,7 @@ impl SignalRef {
     fn signal(&self, hm: &Board) -> Option<Signal> {
         debug!("getting signal {:?}", self);
         match self {
-            SignalRef::Wire(ref other) => get_signal(hm, other),
+            SignalRef::Wire(ref other) => hm.get_signal(other),
             SignalRef::Signal(val) => Some(*val),
         }
     }
@@ -242,13 +373,6 @@ impl Wire {
                 }
             }
         }
-    }
-}
-
-fn get_signal(hm: &Board, key: &str) -> Option<Signal> {
-    match hm.get(key).map(|sw| sw.signal(hm)) {
-        Some(Some(x)) => Some(x),
-        _ => None,
     }
 }
 
@@ -327,6 +451,59 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_p1_realistic() {
+        let buf = "o AND q -> r
+p -> q
+b OR n -> o
+b AND n -> p
+k AND m -> n
+l -> m
+d OR j -> k
+d AND j -> l
+b RSHIFT 2 -> d
+g AND i -> j
+h -> i
+e AND f -> h
+e OR f -> g
+b RSHIFT 3 -> e
+b RSHIFT 5 -> f
+19138 -> b
+";
+        let mut board = Board::new();
+        part1(buf, &mut board);
+        let b = 19138;
+        assert_eq!(board.get_signal("b"), Some(b));
+        let f = b >> 5;
+        assert_eq!(board.get_signal("f"), Some(f));
+        let e = b >> 3;
+        assert_eq!(board.get_signal("e"), Some(e));
+        let g = e | f;
+        assert_eq!(board.get_signal("g"), Some(g));
+        let h = e & f;
+        assert_eq!(board.get_signal("h"), Some(h));
+        let i = h;
+        assert_eq!(board.get_signal("i"), Some(i));
+        let j = g & i;
+        assert_eq!(board.get_signal("j"), Some(j));
+        let d = b >> 2;
+        assert_eq!(board.get_signal("d"), Some(d));
+        let l = d & j;
+        assert_eq!(board.get_signal("l"), Some(l));
+        let k = d | j;
+        assert_eq!(board.get_signal("k"), Some(k));
+        let m = l;
+        assert_eq!(board.get_signal("m"), Some(m));
+        let n = k & m;
+        assert_eq!(board.get_signal("n"), Some(n));
+        let p = b & n;
+        assert_eq!(board.get_signal("p"), Some(p));
+        let o = b | n;
+        assert_eq!(board.get_signal("o"), Some(o));
+        let q = p;
+        assert_eq!(board.get_signal("q"), Some(q));
+    }
+
+    #[test]
     fn test_part1() {
         let buf = "123 -> x
 456 -> y
@@ -338,14 +515,14 @@ NOT x -> h
 NOT y -> i";
         let mut board = Board::new();
         part1(buf, &mut board);
-        assert_eq!(get_signal(&board, "d"), Some(72));
-        assert_eq!(get_signal(&board, "e"), Some(507));
-        assert_eq!(get_signal(&board, "f"), Some(492));
-        assert_eq!(get_signal(&board, "g"), Some(114));
-        assert_eq!(get_signal(&board, "h"), Some(65412));
-        assert_eq!(get_signal(&board, "i"), Some(65079));
-        assert_eq!(get_signal(&board, "x"), Some(123));
-        assert_eq!(get_signal(&board, "y"), Some(456));
+        assert_eq!(board.get_signal("d"), Some(72));
+        assert_eq!(board.get_signal("e"), Some(507));
+        assert_eq!(board.get_signal("f"), Some(492));
+        assert_eq!(board.get_signal("g"), Some(114));
+        assert_eq!(board.get_signal("h"), Some(65412));
+        assert_eq!(board.get_signal("i"), Some(65079));
+        assert_eq!(board.get_signal("x"), Some(123));
+        assert_eq!(board.get_signal("y"), Some(456));
     }
 
     #[test]
