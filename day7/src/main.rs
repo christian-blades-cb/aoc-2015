@@ -36,6 +36,14 @@ fn main() -> Result<(), std::io::Error> {
     let res_p1 = cached.solve("a");
     println!("day7.1 {:?}", res_p1);
 
+    board
+        .0
+        .entry("b".into())
+        .and_modify(|e| *e = Wire(Wiring::Wire(SignalRef::Signal(res_p1.unwrap()))));
+    let mut cached = Cache::new(&board);
+    let res_p2 = cached.solve("a");
+    println!("day7.2 {:?}", res_p2);
+
     Ok(())
 }
 
